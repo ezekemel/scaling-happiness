@@ -8,7 +8,7 @@ import {
 // --- FIREBASE IMPORTS ---
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
 import { 
-  getAuth, GoogleAuthProvider, signInWithRedirect, onAuthStateChanged, signOut 
+  getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut 
 } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
 import { 
   getFirestore, doc, setDoc, getDoc, onSnapshot 
@@ -21,7 +21,6 @@ import {
 import { GoogleGenerativeAI } from "https://esm.run/@google/generative-ai";
 
 // --- CONFIGURATION ---
-// 1. PASTE YOUR FIREBASE KEYS HERE
 const firebaseConfig = {
   apiKey: "AIzaSyCY2r-9oj8Pv5Yj3q28qO-DlcOeQ4psB2w",
   authDomain: "scaling-happiness-17a16.firebaseapp.com",
@@ -32,7 +31,6 @@ const firebaseConfig = {
   measurementId: "G-S1Z0NY61Q9"
 };
 
-// 2. PASTE YOUR GEMINI API KEY HERE
 const GEMINI_API_KEY = "AIzaSyA9OG-JjtC52UEOWH-14EjvZLio94iSMls"; 
 
 // Initialize Services
@@ -41,8 +39,8 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const storage = getStorage(app);
 const provider = new GoogleAuthProvider();
-// Safety check
-const genAI = GEMINI_API_KEY.includes("PASTE") ? null : new GoogleGenerativeAI(GEMINI_API_KEY);
+// Initialize Gemini
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 const BioHackTracker = () => {
   // --- State ---
@@ -88,8 +86,17 @@ const BioHackTracker = () => {
   }, [user]);
 
   const handleLogin = async () => {
-    try { await signInWithRedirect(auth, provider); } 
-    catch (error) { console.error(error); setFeedbackMessage("Login failed."); }
+    setFeedbackMessage("Opening Google Login...");
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (error) {
+      console.error("Login failed", error);
+      if (error.code === 'auth/popup-closed-by-user') {
+        setFeedbackMessage("Login cancelled.");
+      } else {
+        setFeedbackMessage(`Login Error: ${error.message}`);
+      }
+    }
   };
 
   const handleLogout = () => {
@@ -105,26 +112,32 @@ const BioHackTracker = () => {
   const currentKey = formatDateKey(selectedDate);
   const dayData = data[currentKey] || { meditation: false, journaling: false, wimHof: false, coldPlunge: false };
 
-  // --- KEY FIX: Split Effects to prevent overwriting Base64 ---
+  // --- EFFECTS ---
   
-  // 1. Handle Date Changes (Clear everything)
+  // 1. Effect: When DATE changes -> Clear the UI and AI memory
   useEffect(() => {
     setAiResponse(null);
-    setImageBase64(null); // Only clear base64 when changing days
     setFeedbackMessage("");
-    // Visual Image update
+    setImageBase64(null); // Reset AI memory for a fresh day
+    
+    // Load visual image if exists
     if (data[currentKey]?.journalImageUrl) {
       setUploadedImage(data[currentKey].journalImageUrl);
     } else {
       setUploadedImage(null);
     }
-  }, [selectedDate, currentKey, data]); // Depend on date change
+  }, [selectedDate, currentKey]); 
 
-  // 2. Handle General Data & Streak (Don't wipe base64)
+  // 2. Effect: When DATA changes -> Update visual state only
   useEffect(() => {
     setStreak(calculateStreak(data));
     pickRandomQuote();
-  }, [data]); // Depend only on data updates
+    
+    // Update visual image if data updates, but ONLY if we don't have a local upload pending
+    if (data[currentKey]?.journalImageUrl && !imageBase64) {
+       setUploadedImage(data[currentKey].journalImageUrl);
+    }
+  }, [data]); 
 
   const calculateStreak = (dataset) => {
     let currentStreak = 0;
@@ -146,19 +159,35 @@ const BioHackTracker = () => {
 
   // --- GEMINI AI LOGIC ---
   const analyzeWithGemini = async () => {
-    console.log("Analyzing..."); // Debug Log
+    // 1. Check for Image
+    let activeBase64 = imageBase64;
     
-    if (!genAI) {
-        setFeedbackMessage("API Key missing in code! Check App.jsx");
-        return;
+    // If page reloaded, try to fetch the image from URL to rebuild Base64
+    if (!activeBase64 && uploadedImage) {
+        setFeedbackMessage(language === 'en' ? "🔄 Restoring image memory..." : "🔄 Restaurando imagen...");
+        try {
+            const response = await fetch(uploadedImage);
+            const blob = await response.blob();
+            activeBase64 = await new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result);
+                reader.readAsDataURL(blob);
+            });
+            setImageBase64(activeBase64); 
+        } catch (e) {
+            console.error("Fetch error:", e);
+            setFeedbackMessage("Error recovering image.");
+            return;
+        }
     }
-    if (!imageBase64) {
+
+    if (!activeBase64) {
       setFeedbackMessage(language === 'en' ? "⚠️ Please re-upload image to analyze." : "⚠️ Por favor resubí la imagen.");
       return;
     }
 
     setIsAnalyzing(true);
-    setFeedbackMessage("");
+    setFeedbackMessage(language === 'en' ? "🧠 Coach Joe is thinking..." : "🧠 Analizando...");
 
     try {
       const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
@@ -167,7 +196,7 @@ const BioHackTracker = () => {
         ? `Act as a Joe Hudson-style executive coach. Analyze this handwritten journal entry. Output format: **1. The Hidden Emotion:** **2. Somatic Check:** **3. The Challenge:**`
         : `Actúa como un coach estilo Joe Hudson. Analiza esta entrada de diario. Formato: **1. La Emoción Oculta:** **2. Chequeo Somático:** **3. El Desafío:**`;
 
-      const base64Data = imageBase64.split(',')[1];
+      const base64Data = activeBase64.split(',')[1];
       const imagePart = { inlineData: { data: base64Data, mimeType: "image/jpeg" } };
 
       const result = await model.generateContent([prompt, imagePart]);
@@ -175,10 +204,11 @@ const BioHackTracker = () => {
       const text = response.text();
       
       setAiResponse(text);
+      setFeedbackMessage("");
 
     } catch (error) {
       console.error("Gemini Error:", error);
-      setFeedbackMessage("AI Error. Check console for details.");
+      setFeedbackMessage("AI Error. Check console.");
     } finally {
       setIsAnalyzing(false);
     }
@@ -194,7 +224,7 @@ const BioHackTracker = () => {
     // 1. Create Base64 for Gemini immediately
     const reader = new FileReader();
     reader.onloadend = () => {
-      setImageBase64(reader.result); // Store this for AI!
+      setImageBase64(reader.result); 
     };
     reader.readAsDataURL(file);
 
@@ -270,7 +300,8 @@ const BioHackTracker = () => {
   const quotes = ["The obstacle is the way.", "Clarity comes from engagement.", "Discipline is freedom."];
   const pickRandomQuote = () => setDailyQuote(quotes[Math.floor(Math.random() * quotes.length)]);
 
-  // --- Timer Logic ---
+  // --- Timer & Audio ---
+  const playSound = () => {}; 
   const PHASES = [{id:0,d:0},{id:1,d:360},{id:2,d:150},{id:3,d:240}];
   
   useEffect(() => {
@@ -284,8 +315,22 @@ const BioHackTracker = () => {
   const nextPhase = () => { if (currentPhase < 3) startPhase(currentPhase+1); else { setTimerActive(false); setSessionComplete(true); }};
 
   // --- Render ---
-  if (loadingAuth) return <div className="min-h-screen flex items-center justify-center"><Loader2 className="animate-spin"/></div>;
-  if (!user) return <div className="min-h-screen flex items-center justify-center"><button onClick={handleLogin} className="bg-slate-900 text-white px-6 py-3 rounded-xl">{text.loginBtn}</button></div>;
+  if (loadingAuth) return <div className="min-h-screen flex items-center justify-center bg-slate-50"><Loader2 className="animate-spin text-emerald-500" size={48}/></div>;
+  
+  // LOGIN SCREEN
+  if (!user) return (
+    <div className="min-h-screen flex flex-col items-center justify-center px-4 bg-slate-50">
+      <div className="bg-white p-8 rounded-3xl shadow-xl max-w-sm w-full text-center border border-slate-100">
+        <div className="flex justify-center mb-6"><div className="p-3 bg-amber-100 rounded-full"><Sun className="text-amber-500" size={32}/></div></div>
+        <h1 className="text-2xl font-bold mb-2 text-slate-800">{text.title}</h1>
+        <p className="text-slate-500 mb-8">{text.login}</p>
+        <button onClick={handleLogin} className="bg-slate-900 text-white px-6 py-3.5 rounded-xl w-full flex justify-center items-center gap-2 hover:bg-slate-800 transition-all shadow-lg hover:shadow-xl active:scale-95 font-bold">
+          <LogIn size={20}/> {text.loginBtn}
+        </button>
+        {feedbackMessage && <div className="mt-4 text-amber-600 text-sm font-medium bg-amber-50 py-2 px-3 rounded-lg">{feedbackMessage}</div>}
+      </div>
+    </div>
+  );
 
   const completedCount = ['meditation', 'journaling', 'wimHof', 'coldPlunge'].filter(k => dayData[k]).length;
   const progress = Math.min((completedCount / 2) * 100, 100);
@@ -389,7 +434,7 @@ const BioHackTracker = () => {
         </div>
         
         {/* Message Area */}
-        {feedbackMessage && <div className="fixed bottom-4 left-0 right-0 mx-auto w-max bg-slate-800 text-white px-4 py-2 rounded-full text-sm shadow-xl animate-bounce">{feedbackMessage}</div>}
+        {feedbackMessage && <div className="fixed bottom-4 left-0 right-0 mx-auto w-max bg-slate-800 text-white px-4 py-2 rounded-full text-sm shadow-xl animate-bounce z-50">{feedbackMessage}</div>}
 
       </div>
     </div>
@@ -397,4 +442,3 @@ const BioHackTracker = () => {
 };
 
 export default BioHackTracker;
-
