@@ -6,7 +6,6 @@ import {
 } from 'lucide-react';
 
 // --- FIREBASE IMPORTS ---
-// We use the CDN imports so you don't have to deal with complex npm installs.
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
 import { 
   getAuth, GoogleAuthProvider, signInWithRedirect, onAuthStateChanged, signOut 
@@ -24,7 +23,7 @@ import { GoogleGenerativeAI } from "https://esm.run/@google/generative-ai";
 // --- CONFIGURATION ---
 // 1. PASTE YOUR FIREBASE KEYS HERE
 const firebaseConfig = {
-   apiKey: "AIzaSyCY2r-9oj8Pv5Yj3q28qO-DlcOeQ4psB2w",
+  apiKey: "AIzaSyCY2r-9oj8Pv5Yj3q28qO-DlcOeQ4psB2w",
   authDomain: "scaling-happiness-17a16.firebaseapp.com",
   projectId: "scaling-happiness-17a16",
   storageBucket: "scaling-happiness-17a16.firebasestorage.app",
@@ -34,7 +33,7 @@ const firebaseConfig = {
 };
 
 // 2. PASTE YOUR GEMINI API KEY HERE
-const GEMINI_API_KEY = "PASTE_GEMINI_KEY_HERE"; 
+const GEMINI_API_KEY = "AIzaSyA9OG-JjtC52UEOWH-14EjvZLio94iSMls"; 
 
 // Initialize Services
 const app = initializeApp(firebaseConfig);
@@ -42,7 +41,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const storage = getStorage(app);
 const provider = new GoogleAuthProvider();
-// Safety check for Gemini Key to prevent crash if empty
+// Safety check
 const genAI = GEMINI_API_KEY.includes("PASTE") ? null : new GoogleGenerativeAI(GEMINI_API_KEY);
 
 const BioHackTracker = () => {
@@ -106,19 +105,26 @@ const BioHackTracker = () => {
   const currentKey = formatDateKey(selectedDate);
   const dayData = data[currentKey] || { meditation: false, journaling: false, wimHof: false, coldPlunge: false };
 
+  // --- KEY FIX: Split Effects to prevent overwriting Base64 ---
+  
+  // 1. Handle Date Changes (Clear everything)
+  useEffect(() => {
+    setAiResponse(null);
+    setImageBase64(null); // Only clear base64 when changing days
+    setFeedbackMessage("");
+    // Visual Image update
+    if (data[currentKey]?.journalImageUrl) {
+      setUploadedImage(data[currentKey].journalImageUrl);
+    } else {
+      setUploadedImage(null);
+    }
+  }, [selectedDate, currentKey, data]); // Depend on date change
+
+  // 2. Handle General Data & Streak (Don't wipe base64)
   useEffect(() => {
     setStreak(calculateStreak(data));
     pickRandomQuote();
-    if (data[currentKey]?.journalImageUrl) {
-      setUploadedImage(data[currentKey].journalImageUrl);
-      // Reset base64 if loading from history (user must re-upload to analyze old entries due to security)
-      setImageBase64(null); 
-    } else {
-      setUploadedImage(null);
-      setImageBase64(null);
-    }
-    setAiResponse(null); // Clear AI on date change
-  }, [data, selectedDate, language]);
+  }, [data]); // Depend only on data updates
 
   const calculateStreak = (dataset) => {
     let currentStreak = 0;
@@ -140,12 +146,14 @@ const BioHackTracker = () => {
 
   // --- GEMINI AI LOGIC ---
   const analyzeWithGemini = async () => {
+    console.log("Analyzing..."); // Debug Log
+    
     if (!genAI) {
-        setFeedbackMessage("API Key missing in code!");
+        setFeedbackMessage("API Key missing in code! Check App.jsx");
         return;
     }
     if (!imageBase64) {
-      setFeedbackMessage(language === 'en' ? "Please re-upload image to analyze." : "Por favor resubí la imagen para analizar.");
+      setFeedbackMessage(language === 'en' ? "⚠️ Please re-upload image to analyze." : "⚠️ Por favor resubí la imagen.");
       return;
     }
 
@@ -153,44 +161,25 @@ const BioHackTracker = () => {
     setFeedbackMessage("");
 
     try {
-      // 1. Prepare the Model
       const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-      // 2. Define the Prompt (Joe Hudson Style)
       const prompt = language === 'en' 
-        ? `Act as a Joe Hudson-style executive coach (Art of Accomplishment). Analyze this handwritten journal entry.
-           Output format:
-           **1. The Hidden Emotion:** (What emotion is underneath the text?)
-           **2. Somatic Check:** (Ask me where I feel the resistance in my body)
-           **3. The Challenge:** (Give me a specific Yes/No challenge for tomorrow based on my 'brave' entry)`
-        : `Actúa como un coach estilo Joe Hudson (Art of Accomplishment). Analiza esta entrada de diario manuscrita.
-           Formato de salida:
-           **1. La Emoción Oculta:** (¿Qué emoción subyace en el texto?)
-           **2. Chequeo Somático:** (Preguntame dónde siento la resistencia en mi cuerpo)
-           **3. El Desafío:** (Dame un desafío específico de Sí/No para mañana basado en mi entrada de 'valentía')`;
+        ? `Act as a Joe Hudson-style executive coach. Analyze this handwritten journal entry. Output format: **1. The Hidden Emotion:** **2. Somatic Check:** **3. The Challenge:**`
+        : `Actúa como un coach estilo Joe Hudson. Analiza esta entrada de diario. Formato: **1. La Emoción Oculta:** **2. Chequeo Somático:** **3. El Desafío:**`;
 
-      // 3. Prepare Image Part
-      // Remove the "data:image/jpeg;base64," prefix
       const base64Data = imageBase64.split(',')[1];
-      
-      const imagePart = {
-        inlineData: {
-          data: base64Data,
-          mimeType: "image/jpeg",
-        },
-      };
+      const imagePart = { inlineData: { data: base64Data, mimeType: "image/jpeg" } };
 
-      // 4. Call API
       const result = await model.generateContent([prompt, imagePart]);
       const response = await result.response;
       const text = response.text();
       
       setAiResponse(text);
-      setIsAnalyzing(false);
 
     } catch (error) {
       console.error("Gemini Error:", error);
-      setFeedbackMessage("AI Analysis Failed. Check API Key.");
+      setFeedbackMessage("AI Error. Check console for details.");
+    } finally {
       setIsAnalyzing(false);
     }
   };
@@ -205,7 +194,7 @@ const BioHackTracker = () => {
     // 1. Create Base64 for Gemini immediately
     const reader = new FileReader();
     reader.onloadend = () => {
-      setImageBase64(reader.result);
+      setImageBase64(reader.result); // Store this for AI!
     };
     reader.readAsDataURL(file);
 
@@ -281,8 +270,7 @@ const BioHackTracker = () => {
   const quotes = ["The obstacle is the way.", "Clarity comes from engagement.", "Discipline is freedom."];
   const pickRandomQuote = () => setDailyQuote(quotes[Math.floor(Math.random() * quotes.length)]);
 
-  // --- Timer & Audio (Simplified for brevity) ---
-  const playSound = () => {}; // Placeholder to save space, add back if needed
+  // --- Timer Logic ---
   const PHASES = [{id:0,d:0},{id:1,d:360},{id:2,d:150},{id:3,d:240}];
   
   useEffect(() => {
@@ -399,9 +387,14 @@ const BioHackTracker = () => {
             )}
           </div>
         </div>
+        
+        {/* Message Area */}
+        {feedbackMessage && <div className="fixed bottom-4 left-0 right-0 mx-auto w-max bg-slate-800 text-white px-4 py-2 rounded-full text-sm shadow-xl animate-bounce">{feedbackMessage}</div>}
+
       </div>
     </div>
   );
 };
 
 export default BioHackTracker;
+
